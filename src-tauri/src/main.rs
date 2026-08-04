@@ -8,7 +8,11 @@ fn main() {
             commands::get_device_info,
             commands::boot_ramdisk,
             commands::backup_files,
-            commands::run_custom_cmd
+            commands::save_ssh_password,
+            commands::get_ssh_password,
+            commands::delete_ssh_password,
+            commands::save_config,
+            commands::load_config
         ])
         .setup(|app| {
             let window = app.get_window("main");

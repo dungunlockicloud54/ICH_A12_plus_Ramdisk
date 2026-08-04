@@ -1,10 +1,12 @@
 use serde::Serialize;
 use std::process::{Command, Stdio};
 use anyhow::Result;
-use tauri::api::process::CommandChild;
 use tauri::Window;
 use std::io::{BufRead, BufReader};
 use std::thread;
+use std::fs;
+use tauri::api::path::app_config_dir;
+use keyring::Keyring;
 
 #[derive(Serialize)]
 pub struct Device { pub udid: String }
@@ -101,11 +103,55 @@ pub fn boot_ramdisk(window: Window, udid: String, chip: String, extra_args: Opti
 }
 
 #[tauri::command]
-pub fn backup_files(udid: String, dest_folder: String, host: String, port: u16, user: String, password: String, overwrite: bool) -> Result<String, String> {
+pub fn save_ssh_password(host: String, port: u16, user: String, password: String) -> Result<String, String> {
+    let key = format!("ssh:{}:{}:{}", host, port, user);
+    let kr = Keyring::new("DienThoai88 Ramdisk Tool", &key);
+    match kr.set_password(&password) {
+        Ok(()) => Ok("saved".to_string()),
+        Err(e) => Err(format!("failed to save keychain entry: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn get_ssh_password(host: String, port: u16, user: String) -> Result<Option<String>, String> {
+    let key = format!("ssh:{}:{}:{}", host, port, user);
+    let kr = Keyring::new("DienThoai88 Ramdisk Tool", &key);
+    match kr.get_password() {
+        Ok(pw) => Ok(Some(pw)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(format!("failed to read keychain entry: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn delete_ssh_password(host: String, port: u16, user: String) -> Result<String, String> {
+    let key = format!("ssh:{}:{}:{}", host, port, user);
+    let kr = Keyring::new("DienThoai88 Ramdisk Tool", &key);
+    match kr.delete_password() {
+        Ok(()) => Ok("deleted".to_string()),
+        Err(e) => Err(format!("failed to delete keychain entry: {}", e))
+    }
+}
+
+#[tauri::command]
+pub fn backup_files(udid: String, dest_folder: String, host: String, port: u16, user: String, password: Option<String>, use_keychain: bool, overwrite: bool) -> Result<String, String> {
     // Calls the Python backup helper script gui/scripts/backup_active_files.py
+    let mut final_password = None;
+    if use_keychain {
+        // try retrieve
+        match get_ssh_password(host.clone(), port, user.clone()) {
+            Ok(opt) => { final_password = opt; }
+            Err(e) => return Err(format!("Failed to read password from keychain: {}", e))
+        }
+    } else {
+        final_password = password;
+    }
+
+    let pwd_for_arg = final_password.unwrap_or_else(|| "".to_string());
+
     let mut cmd = Command::new("python3");
     cmd.arg("./gui/scripts/backup_active_files.py");
-    cmd.arg(&udid).arg(&dest_folder).arg(&host).arg(port.to_string()).arg(&user).arg(&password).arg(if overwrite {"yes"} else {"no"});
+    cmd.arg(&udid).arg(&dest_folder).arg(&host).arg(port.to_string()).arg(&user).arg(&pwd_for_arg).arg(if overwrite {"yes"} else {"no"});
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     match cmd.output() {
@@ -115,10 +161,34 @@ pub fn backup_files(udid: String, dest_folder: String, host: String, port: u16, 
 }
 
 #[tauri::command]
-pub fn run_custom_cmd(cmdline: String) -> Result<String, String> {
-    // Very generic: runs a shell command. Use with caution. UI should constrain usage.
-    match Command::new("sh").arg("-c").arg(&cmdline).output() {
-        Ok(out) => Ok(format!("{}\n---stderr---\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))),
-        Err(e) => Err(format!("Failed to run command: {}", e))
+pub fn save_config(config_json: String) -> Result<String, String> {
+    match app_config_dir() {
+        Some(mut path) => {
+            path.push("DienThoai88");
+            if let Err(e) = fs::create_dir_all(&path) {
+                return Err(format!("Failed to create config dir: {}", e));
+            }
+            path.push("config.json");
+            if let Err(e) = fs::write(&path, config_json) {
+                return Err(format!("Failed to write config: {}", e));
+            }
+            Ok(format!("wrote {}", path.display()))
+        }
+        None => Err("Could not determine app config directory".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn load_config() -> Result<Option<String>, String> {
+    match app_config_dir() {
+        Some(mut path) => {
+            path.push("DienThoai88");
+            path.push("config.json");
+            match fs::read_to_string(&path) {
+                Ok(s) => Ok(Some(s)),
+                Err(_) => Ok(None)
+            }
+        }
+        None => Err("Could not determine app config directory".to_string())
     }
 }

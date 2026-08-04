@@ -16,6 +16,7 @@ function App(){
   const [password, setPassword] = useState('alpine')
   const [overwrite, setOverwrite] = useState(true)
   const [isBooting, setIsBooting] = useState(false)
+  const [saveKeychain, setSaveKeychain] = useState(true)
 
   async function refreshDevices(){
     try{
@@ -29,6 +30,21 @@ function App(){
   useEffect(()=>{
     refreshDevices()
     const interval = setInterval(refreshDevices, 5000)
+
+    // load persisted config
+    invoke('load_config').then(cfg => {
+      if(cfg) {
+        try{
+          const parsed = JSON.parse(cfg)
+          if(parsed.backupFolder) setBackupFolder(parsed.backupFolder)
+          if(parsed.host) setHost(parsed.host)
+          if(parsed.port) setPort(parsed.port)
+          if(parsed.user) setUser(parsed.user)
+          if(parsed.overwrite !== undefined) setOverwrite(parsed.overwrite)
+          if(parsed.chip) setChip(parsed.chip)
+        }catch(e){ console.warn('failed to parse config', e) }
+      }
+    }).catch(e=>console.warn('load_config failed', e))
 
     // event listeners for boot logs
     let unlistenBootLog, unlistenBootFinished
@@ -52,6 +68,14 @@ function App(){
     }catch(e){ setDeviceInfo('Failed: '+JSON.stringify(e)) }
   }
 
+  async function saveSettings(){
+    const cfg = { backupFolder, host, port, user, overwrite, chip }
+    try{
+      await invoke('save_config', { config_json: JSON.stringify(cfg) })
+      setLog(l=> 'Saved config\n' + l)
+    }catch(e){ setLog(l=>'Failed to save config: '+JSON.stringify(e)+'\n'+l) }
+  }
+
   async function doBoot(){
     if(!selected) return alert('Select device')
     setLog(l=>'Starting boot...\n'+l)
@@ -65,7 +89,10 @@ function App(){
     if(!selected) return alert('Select device')
     setLog(l=>'Starting backup...\n'+l)
     try{
-      const out = await invoke('backup_files', { udid: selected.udid, dest_folder: backupFolder, host, port, user, password, overwrite })
+      if(saveKeychain){
+        await invoke('save_ssh_password', { host, port, user, password })
+      }
+      const out = await invoke('backup_files', { udid: selected.udid, dest_folder: backupFolder, host, port, user, password: null, use_keychain: saveKeychain, overwrite })
       setLog(l=>out + '\n' + l)
     }catch(e){ setLog(l=>'Backup failed: '+JSON.stringify(e)+'\n'+l) }
   }
@@ -114,6 +141,11 @@ function App(){
               <input value={user} onChange={e=>setUser(e.target.value)} className="p-2 border rounded col-span-1" placeholder="user" />
               <input value={password} onChange={e=>setPassword(e.target.value)} className="p-2 border rounded col-span-1" placeholder="password" />
               <label className="flex items-center col-span-2"><input type="checkbox" checked={overwrite} onChange={e=>setOverwrite(e.target.checked)} className="mr-2"/>Overwrite existing</label>
+            </div>
+
+            <div className="mt-2 flex items-center gap-2">
+              <label className="flex items-center"><input type="checkbox" checked={saveKeychain} onChange={e=>setSaveKeychain(e.target.checked)} className="mr-2"/>Save password to Keychain</label>
+              <button onClick={saveSettings} className="px-3 py-1 bg-gray-600 text-white rounded">Save Settings</button>
             </div>
 
             <div className="mt-4 flex gap-2">
