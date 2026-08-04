@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/tauri'
+import { listen } from '@tauri-apps/api/event'
 
 function App(){
   const [devices, setDevices] = useState([])
@@ -9,6 +10,12 @@ function App(){
   const [backupFolder, setBackupFolder] = useState('~/RamdiskBackups')
   const [chip, setChip] = useState('A12')
   const [extraArgs, setExtraArgs] = useState('--enable-ssh')
+  const [host, setHost] = useState('127.0.0.1')
+  const [port, setPort] = useState(2222)
+  const [user, setUser] = useState('root')
+  const [password, setPassword] = useState('alpine')
+  const [overwrite, setOverwrite] = useState(true)
+  const [isBooting, setIsBooting] = useState(false)
 
   async function refreshDevices(){
     try{
@@ -22,7 +29,20 @@ function App(){
   useEffect(()=>{
     refreshDevices()
     const interval = setInterval(refreshDevices, 5000)
-    return ()=>clearInterval(interval)
+
+    // event listeners for boot logs
+    let unlistenBootLog, unlistenBootFinished
+    listen('boot-log', event => {
+      const payload = event.payload;
+      setLog(l => payload + '\n' + l)
+    }).then(f => { unlistenBootLog = f })
+    listen('boot-finished', event => {
+      const payload = event.payload;
+      setLog(l => ('BOOT FINISHED: ' + payload) + '\n' + l)
+      setIsBooting(false)
+    }).then(f => { unlistenBootFinished = f })
+
+    return ()=>{ clearInterval(interval); if(unlistenBootLog) unlistenBootLog(); if(unlistenBootFinished) unlistenBootFinished(); }
   },[])
 
   async function showInfo(udid){
@@ -35,14 +55,19 @@ function App(){
   async function doBoot(){
     if(!selected) return alert('Select device')
     setLog(l=>'Starting boot...\n'+l)
-    const out = await invoke('boot_ramdisk', { udid: selected.udid, chip, extra_args: extraArgs })
-    setLog(l=>out + '\n' + l)
+    setIsBooting(true)
+    try{
+      await invoke('boot_ramdisk', { udid: selected.udid, chip, extra_args: extraArgs })
+    }catch(e){ setLog(l=>'Failed to start boot: '+JSON.stringify(e)+'\n'+l); setIsBooting(false) }
   }
 
   async function doBackup(){
     if(!selected) return alert('Select device')
-    const out = await invoke('backup_files', { udid: selected.udid, dest_folder: backupFolder, extra_args: '' })
-    setLog(l=>out + '\n' + l)
+    setLog(l=>'Starting backup...\n'+l)
+    try{
+      const out = await invoke('backup_files', { udid: selected.udid, dest_folder: backupFolder, host, port, user, password, overwrite })
+      setLog(l=>out + '\n' + l)
+    }catch(e){ setLog(l=>'Backup failed: '+JSON.stringify(e)+'\n'+l) }
   }
 
   return (
@@ -83,8 +108,16 @@ function App(){
               <input value={backupFolder} onChange={e=>setBackupFolder(e.target.value)} className="p-2 border rounded col-span-1" />
             </div>
 
+            <div className="mt-4 grid grid-cols-6 gap-2">
+              <input value={host} onChange={e=>setHost(e.target.value)} className="p-2 border rounded col-span-1" placeholder="host" />
+              <input type="number" value={port} onChange={e=>setPort(Number(e.target.value))} className="p-2 border rounded col-span-1" placeholder="port" />
+              <input value={user} onChange={e=>setUser(e.target.value)} className="p-2 border rounded col-span-1" placeholder="user" />
+              <input value={password} onChange={e=>setPassword(e.target.value)} className="p-2 border rounded col-span-1" placeholder="password" />
+              <label className="flex items-center col-span-2"><input type="checkbox" checked={overwrite} onChange={e=>setOverwrite(e.target.checked)} className="mr-2"/>Overwrite existing</label>
+            </div>
+
             <div className="mt-4 flex gap-2">
-              <button onClick={doBoot} className="px-4 py-2 bg-green-600 text-white rounded">Boot Ramdisk</button>
+              <button disabled={isBooting} onClick={doBoot} className="px-4 py-2 bg-green-600 text-white rounded">{isBooting? 'Booting...':'Boot Ramdisk'}</button>
               <button onClick={doBackup} className="px-4 py-2 bg-yellow-600 text-white rounded">Backup Active Files</button>
               <button onClick={()=>navigator.clipboard.writeText(deviceInfo)} className="px-4 py-2 bg-gray-600 text-white rounded">Copy Info</button>
             </div>

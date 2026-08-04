@@ -2,6 +2,9 @@ use serde::Serialize;
 use std::process::{Command, Stdio};
 use anyhow::Result;
 use tauri::api::process::CommandChild;
+use tauri::Window;
+use std::io::{BufRead, BufReader};
+use std::thread;
 
 #[derive(Serialize)]
 pub struct Device { pub udid: String }
@@ -37,13 +40,11 @@ pub fn get_device_info(udid: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn boot_ramdisk(udid: String, chip: String, extra_args: Option<String>) -> Result<String, String> {
+pub fn boot_ramdisk(window: Window, udid: String, chip: String, extra_args: Option<String>) -> Result<String, String> {
     // Calls the existing ich_a12_plus_ramdisk binary in repo root. The exact CLI flags depend on your local binary.
-    // This function forwards parameters to the binary. Example usage from UI: extra_args="--enable-ssh"
     let mut cmd = Command::new("./ich_a12_plus_ramdisk");
     cmd.arg("--udid").arg(&udid).arg("--chip").arg(&chip);
     if let Some(args) = extra_args {
-        // naive split — UI should provide a safe string
         for token in args.split_whitespace() {
             cmd.arg(token);
         }
@@ -51,30 +52,60 @@ pub fn boot_ramdisk(udid: String, chip: String, extra_args: Option<String>) -> R
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    match cmd.output() {
-        Ok(out) => {
-            let mut combined = String::new();
-            combined.push_str(&String::from_utf8_lossy(&out.stdout));
-            combined.push_str("\n---stderr---\n");
-            combined.push_str(&String::from_utf8_lossy(&out.stderr));
-            Ok(combined)
+    match cmd.spawn() {
+        Ok(mut child) => {
+            let mut stdout = child.stdout.take();
+            let mut stderr = child.stderr.take();
+            let w1 = window.clone();
+            // stdout thread
+            if let Some(out) = stdout {
+                thread::spawn(move || {
+                    let reader = BufReader::new(out);
+                    for line in reader.lines() {
+                        if let Ok(l) = line {
+                            let _ = w1.emit("boot-log", l);
+                        }
+                    }
+                });
+            }
+            // stderr thread
+            let w2 = window.clone();
+            if let Some(err) = stderr {
+                thread::spawn(move || {
+                    let reader = BufReader::new(err);
+                    for line in reader.lines() {
+                        if let Ok(l) = line {
+                            let _ = w2.emit("boot-log", format!("[stderr] {}", l));
+                        }
+                    }
+                });
+            }
+
+            // spawn a thread to wait for exit and emit finished event
+            let w3 = window.clone();
+            thread::spawn(move || {
+                match child.wait() {
+                    Ok(status) => {
+                        let _ = w3.emit("boot-finished", format!("exit:{}", status.code().unwrap_or(-1)));
+                    }
+                    Err(e) => {
+                        let _ = w3.emit("boot-finished", format!("error:{}", e));
+                    }
+                }
+            });
+
+            Ok("started".to_string())
         }
         Err(e) => Err(format!("Failed to execute ich_a12_plus_ramdisk: {}", e))
     }
 }
 
 #[tauri::command]
-pub fn backup_files(udid: String, dest_folder: String, extra_args: Option<String>) -> Result<String, String> {
-    // This calls a helper shell script in gui/scripts/backup_active_files.sh
-    let mut script = String::from("./gui/scripts/backup_active_files.sh");
-    // If the user prefers a different script, update UI configuration.
-    let mut cmd = Command::new(&script);
-    cmd.arg(&udid).arg(&dest_folder);
-    if let Some(args) = extra_args {
-        for token in args.split_whitespace() {
-            cmd.arg(token);
-        }
-    }
+pub fn backup_files(udid: String, dest_folder: String, host: String, port: u16, user: String, password: String, overwrite: bool) -> Result<String, String> {
+    // Calls the Python backup helper script gui/scripts/backup_active_files.py
+    let mut cmd = Command::new("python3");
+    cmd.arg("./gui/scripts/backup_active_files.py");
+    cmd.arg(&udid).arg(&dest_folder).arg(&host).arg(port.to_string()).arg(&user).arg(&password).arg(if overwrite {"yes"} else {"no"});
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     match cmd.output() {
@@ -86,7 +117,6 @@ pub fn backup_files(udid: String, dest_folder: String, extra_args: Option<String
 #[tauri::command]
 pub fn run_custom_cmd(cmdline: String) -> Result<String, String> {
     // Very generic: runs a shell command. Use with caution. UI should constrain usage.
-    // We'll run via `sh -c` so the user can pass multiple tokens.
     match Command::new("sh").arg("-c").arg(&cmdline).output() {
         Ok(out) => Ok(format!("{}\n---stderr---\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))),
         Err(e) => Err(format!("Failed to run command: {}", e))
